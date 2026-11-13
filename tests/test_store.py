@@ -164,3 +164,32 @@ def test_external_media_goes_straight_to_skipped(tmp_path: Path) -> None:
         assert store.window_external_links([1], 0, 1_000) == [
             (10, "https://evil.example.com/a.png")
         ]
+
+
+def test_brief_ledger_tracks_written_briefs(tmp_path: Path) -> None:
+    with _store(tmp_path) as store:
+        assert store.last_briefed_to_ms() is None
+        first = store.record_brief(1_000, 2_000, tmp_path / "a.md")
+        assert store.last_briefed_to_ms() == 2_000
+        store.record_brief(2_001, 3_000, None)  # 没写出文件，不算完成
+        assert store.last_briefed_to_ms() == 2_000
+        store.record_brief(2_001, 3_000, tmp_path / "b.md")
+        assert store.last_briefed_to_ms() == 3_000
+        store.mark_brief_pushed(first)
+
+
+def test_brief_ledger_keeps_newest_end(tmp_path: Path) -> None:
+    with _store(tmp_path) as store:
+        store.record_brief(5_000, 6_000, tmp_path / "late.md")
+        store.record_brief(1_000, 2_000, tmp_path / "backfill.md")  # 事后补一段旧窗口
+        assert store.last_briefed_to_ms() == 6_000
+
+
+def test_append_run_note_keeps_original_reason(tmp_path: Path) -> None:
+    with _store(tmp_path) as store:
+        run = store.start_run(0, 100)
+        store.finish_run(run.id, status="ok", requests=1, messages=5, note="")
+        store.append_run_note(run.id, "简报未完成：spi 退出码 1")
+        store.append_run_note(run.id, "已通过飞书提醒")
+        row = store._conn.execute("SELECT note FROM runs WHERE id = ?", (run.id,)).fetchone()
+    assert row["note"] == "简报未完成：spi 退出码 1 | 已通过飞书提醒"

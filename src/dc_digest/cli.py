@@ -49,7 +49,7 @@ from .media import (
 )
 from .pace import BudgetExhausted, Pacer
 from .render import RenderPolicy, chunk_messages
-from .store import Message, Store, WindowImage
+from .store import Message, RunRecord, Store, WindowImage
 from .summarize import (
     ImageInput,
     SummarizeError,
@@ -94,10 +94,18 @@ def _select_channels(config: Config, raw_ids: Sequence[str] | None) -> list[Chan
 
 
 def _resolve_window(
-    args: argparse.Namespace, config: Config, store: Store, *, clamp: bool = True
+    args: argparse.Namespace,
+    config: Config,
+    store: Store,
+    *,
+    kind: str = "fetch",
+    clamp: bool = True,
 ) -> tuple[int, int]:
     now = datetime.now(zone(config.timezone))
-    last_to = store.last_finished_run_to_ms()
+    # fetch 窗口承接上次抓取，brief 窗口承接上次已落盘的简报：两者独立推进
+    last_to = store.last_briefed_to_ms() if kind == "brief" else None
+    if last_to is None:
+        last_to = store.last_finished_run_to_ms()
     if args.from_ is None and args.to is None:
         if last_to is not None:
             return _bounded(last_to, int(now.timestamp() * 1000), config, clamp=clamp)
@@ -311,6 +319,7 @@ class DigestOutcome:
     markdown: str | None
     note: str
     total_messages: int
+    brief_id: int | None = None
 
 
 def _build_images(
@@ -532,7 +541,15 @@ def _digest(
     )
     output_path.write_text(body, encoding="utf-8")
     LOGGER.info("简报已写入 %s", output_path)
-    return DigestOutcome(path=output_path, markdown=markdown, note=note, total_messages=len(messages))
+    # 落盘即记账：推送失败不回退，避免同一段消息反复生成简报
+    brief_id = store.record_brief(from_ms, to_ms, output_path)
+    return DigestOutcome(
+        path=output_path,
+        markdown=markdown,
+        note=note,
+        total_messages=len(messages),
+        brief_id=brief_id,
+    )
 
 
 def _now_text(config: Config) -> str:
@@ -689,8 +706,8 @@ def cmd_fetch(config: Config, args: argparse.Namespace) -> int:
 def cmd_digest(config: Config, args: argparse.Namespace) -> int:
     channels = _select_channels(config, args.channel)
     with Store(config.database) as store:
-        # digest 只读库，不做抓取窗口上限，允许对任意历史区间出简报
-        from_ms, to_ms = _resolve_window(args, config, store, clamp=False)
+        # 简报窗口承接上次已落盘的简报；digest 只读库，不做抓取窗口上限
+        from_ms, to_ms = _resolve_window(args, config, store, kind="brief", clamp=False)
         outcome = _digest(
             config, store, channels, from_ms, to_ms, dry_run=args.dry_run,
             skip_media=args.no_media,
@@ -704,6 +721,8 @@ def cmd_digest(config: Config, args: argparse.Namespace) -> int:
                 f" ~ {format_ms(to_ms, config.timezone, '%m-%d %H:%M')}"
             )
             _push(config, title=title, markdown=outcome.markdown or "", dry_run=args.dry_run)
+            if not args.dry_run and outcome.brief_id is not None:
+                store.mark_brief_pushed(outcome.brief_id)
     return 0
 
 
@@ -711,12 +730,26 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     channels = _select_channels(config, args.channel)
     with Store(config.database) as store:
         from_ms, to_ms = _resolve_window(args, config, store)
+        if args.from_ is None and args.to is None:
+            # 简报单独记账：上次摘要/推送失败时，这里会自动把缺的那段一起补上
+            brief_from_ms, brief_to_ms = _resolve_window(
+                args, config, store, kind="brief", clamp=False
+            )
+        else:
+            brief_from_ms, brief_to_ms = from_ms, to_ms
         LOGGER.info(
             "运行窗口 %s ~ %s，频道 %d 个",
             format_ms(from_ms, config.timezone),
             format_ms(to_ms, config.timezone),
             len(channels),
         )
+        if brief_from_ms < from_ms:
+            LOGGER.info(
+                "简报区间 %s ~ %s（比抓取窗口更早，补上次没落盘的简报）",
+                format_ms(brief_from_ms, config.timezone),
+                format_ms(brief_to_ms, config.timezone),
+            )
+        run: RunRecord | None = None
         if not args.dry_run:
             run = store.start_run(from_ms, to_ms)
             try:
@@ -741,24 +774,32 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
                     window_text=_window_text(config, from_ms, to_ms),
                     reason=fetched.stop_reason,
                     incomplete=fetched.incomplete,
-                no_alert=getattr(args, "no_alert", False),
+                    no_alert=getattr(args, "no_alert", False),
                 )
             if config.media.enabled and not args.no_media:
                 _media_sync(config, store, channels, from_ms, to_ms)
         else:
             LOGGER.info("dry-run：跳过网络抓取与图片下载")
-        outcome = _digest(
-            config, store, channels, from_ms, to_ms, dry_run=args.dry_run,
-            skip_media=args.no_media,
-        )
-        if outcome.path is not None:
-            print(outcome.path)
-            if not args.no_push:
-                title = (
-                    f"Discord 简报 {format_ms(from_ms, config.timezone, '%m-%d %H:%M')}"
-                    f" ~ {format_ms(to_ms, config.timezone, '%m-%d %H:%M')}"
-                )
-                _push(config, title=title, markdown=outcome.markdown or "", dry_run=args.dry_run)
+        # 摘要与推送失败不影响抓取记账，但要把原因写进运行记录，别让状态撒谎
+        try:
+            outcome = _digest(
+                config, store, channels, brief_from_ms, brief_to_ms, dry_run=args.dry_run,
+                skip_media=args.no_media,
+            )
+            if outcome.path is not None:
+                print(outcome.path)
+                if not args.no_push:
+                    title = (
+                        f"Discord 简报 {format_ms(brief_from_ms, config.timezone, '%m-%d %H:%M')}"
+                        f" ~ {format_ms(brief_to_ms, config.timezone, '%m-%d %H:%M')}"
+                    )
+                    _push(config, title=title, markdown=outcome.markdown or "", dry_run=args.dry_run)
+                    if not args.dry_run and outcome.brief_id is not None:
+                        store.mark_brief_pushed(outcome.brief_id)
+        except BaseException as exc:
+            if run is not None and not args.dry_run:
+                store.append_run_note(run.id, f"简报未完成：{exc}"[:500])
+            raise
         if args.prune and not args.dry_run:
             counts = store.prune(config.store.retention_days)
             LOGGER.info(
@@ -886,6 +927,14 @@ def cmd_state(config: Config, args: argparse.Namespace) -> int:
             f"游标 {format_ms(state.cursor_ms, config.timezone)}  "
             f"{'完整' if state.complete else '未完成'}"
         )
+    with Store(config.database) as store:
+        last_brief = store.last_briefed_to_ms()
+        last_run = store.last_finished_run_to_ms()
+    print(
+        f"上次抓取 : {format_ms(last_run, config.timezone) if last_run else '无'}"
+        f"；上次简报 : {format_ms(last_brief, config.timezone) if last_brief else '无'}"
+        "（简报按这条线补缺口）"
+    )
     return 0
 
 

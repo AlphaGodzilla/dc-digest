@@ -47,6 +47,14 @@ CREATE TABLE IF NOT EXISTS runs (
     messages INTEGER NOT NULL DEFAULT 0,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS briefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_from_ms INTEGER NOT NULL,
+    window_to_ms INTEGER NOT NULL,
+    path TEXT,
+    pushed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS message_media (
     message_id INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
@@ -548,6 +556,43 @@ class Store:
             "SELECT window_to_ms FROM runs WHERE status IN ('ok', 'incomplete') ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return int(row["window_to_ms"]) if row else None
+
+
+
+    # ---- 简报台账 ----
+    def record_brief(
+        self, from_ms: int, to_ms: int, path: Path | str | None = None, *, pushed: bool = False
+    ) -> int:
+        """记一条简报。path 为空表示这一轮没写出文件，不算完成。"""
+        cursor = self._conn.execute(
+            "INSERT INTO briefs (window_from_ms, window_to_ms, path, pushed, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (from_ms, to_ms, None if path is None else str(path), int(pushed), _now_iso()),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def mark_brief_pushed(self, brief_id: int) -> None:
+        self._conn.execute("UPDATE briefs SET pushed = 1 WHERE id = ?", (brief_id,))
+        self._conn.commit()
+
+    def last_briefed_to_ms(self) -> int | None:
+        """最近一份已落盘简报的右边界；推送失败不回退，避免同一段反复出简报。"""
+        row = self._conn.execute(
+            "SELECT MAX(window_to_ms) AS to_ms FROM briefs WHERE path IS NOT NULL"
+        ).fetchone()
+        return int(row["to_ms"]) if row and row["to_ms"] is not None else None
+
+    def append_run_note(self, run_id: int, text: str) -> None:
+        """把摘要/推送阶段的失败补进已收尾的运行记录，避免状态与事实不符。"""
+        self._conn.execute(
+            "UPDATE runs SET note = CASE"
+            " WHEN note IS NULL OR note = '' THEN ?"
+            " ELSE note || ' | ' || ? END"
+            " WHERE id = ?",
+            (text, text, run_id),
+        )
+        self._conn.commit()
 
     # ---- 留存清理 ----
 

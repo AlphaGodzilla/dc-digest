@@ -366,3 +366,84 @@ def test_resolve_window_without_clamp_keeps_history_for_digest() -> None:
     args = cli.build_parser().parse_args(["digest", "--from=-7d", "--to=now"])
     from_ms, to_ms = cli._resolve_window(args, _config(), store, clamp=False)
     assert to_ms - from_ms == 7 * 86_400_000
+
+
+def test_brief_window_follows_last_brief_not_last_fetch() -> None:
+    """摘要失败时抓取照常推进，但简报窗口要回到上次落盘的位置补缺口。"""
+    from types import SimpleNamespace
+
+    from dc_digest import cli
+
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    last_fetch = now_ms - 6 * 3_600_000
+    last_brief = now_ms - 9 * 3_600_000  # 比抓取落后，说明有三小时没出简报
+    store = SimpleNamespace(
+        last_briefed_to_ms=lambda: last_brief,
+        last_finished_run_to_ms=lambda: last_fetch,
+    )
+    args = cli.build_parser().parse_args(["run"])
+    fetch_from, _ = cli._resolve_window(args, _config(), store)
+    brief_from, brief_to = cli._resolve_window(args, _config(), store, kind="brief", clamp=False)
+    assert fetch_from == last_fetch
+    assert brief_from == last_brief
+    assert brief_to > brief_from
+
+
+def test_brief_window_falls_back_to_last_fetch() -> None:
+    from types import SimpleNamespace
+
+    from dc_digest import cli
+
+    last_fetch = int(datetime.now(UTC).timestamp() * 1000) - 3 * 3_600_000
+    store = SimpleNamespace(
+        last_briefed_to_ms=lambda: None,
+        last_finished_run_to_ms=lambda: last_fetch,
+    )
+    args = cli.build_parser().parse_args(["run"])
+    brief_from, _ = cli._resolve_window(args, _config(), store, kind="brief")
+    assert brief_from == last_fetch
+
+
+def test_run_keeps_fetch_status_and_notes_brief_failure(tmp_path: Path, monkeypatch) -> None:
+    """摘要失败：抓取记账照常 ok，简报台账不推进，原因写进 note。"""
+    from dataclasses import replace
+
+    from dc_digest import cli
+    from dc_digest.summarize import SummarizeError
+
+    config = replace(_config(), database=tmp_path / "messages.db")
+    args = cli.build_parser().parse_args(["run", "--no-push", "--channel", "1"])
+    fetched = cli.FetchOutcome(requests=1, messages=3, incomplete=[], stop_reason=None)
+    monkeypatch.setattr(cli, "_fetch", lambda *a, **k: fetched)
+    monkeypatch.setattr(cli, "_notify_failure", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli, "_digest", lambda *a, **k: (_ for _ in ()).throw(SummarizeError("spi 退出码 1"))
+    )
+    with pytest.raises(SummarizeError):
+        cli.cmd_run(config, args)
+
+    with Store(config.database) as store:
+        run = store._conn.execute("SELECT status, note FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        briefs = store._conn.execute("SELECT COUNT(*) AS n FROM briefs").fetchone()["n"]
+    assert run["status"] == "ok"
+    assert "简报未完成" in run["note"]
+    assert briefs == 0
+
+
+def test_resolve_window_after_brief_gap_covers_missing_range(tmp_path: Path) -> None:
+    """上一次简报没落盘时，下一次简报窗口要回到旧位置，而不是从抓取终点开始。"""
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from dc_digest import cli
+
+    config = replace(_config(), database=tmp_path / "messages.db")
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    fetch_to = now_ms - 6 * 3_600_000
+    with Store(config.database) as store:
+        run = store.start_run(fetch_to - 3_600_000, fetch_to)
+        store.finish_run(run.id, status="ok", requests=1, messages=10)
+        args = cli.build_parser().parse_args(["run"])
+        brief_from, brief_to = cli._resolve_window(args, config, store, kind="brief")
+    assert brief_from == fetch_to  # 没有更早的简报时，接到上次抓取终点
+    assert brief_to > brief_from
