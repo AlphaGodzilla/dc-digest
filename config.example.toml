@@ -1,0 +1,91 @@
+# dc-digest 配置示例。复制为 config.toml 后按自己的情况修改，config.toml 已被 .gitignore 忽略。
+# Discord token 不放这里，见 README 的「准备」一节。
+timezone = "Asia/Shanghai"
+database = "./data/messages.db"
+output_dir = "./digests"
+# 以上路径相对本文件所在目录解析，绝对路径亦可
+
+[http]
+# 出口代理。留空则沿用环境变量里的 HTTPS_PROXY / ALL_PROXY；httpx 不读 macOS 系统代理设置。
+# 本机有代理且能访问 Discord 时填它的地址，例如 "http://127.0.0.1:7890"。
+proxy = ""
+
+[discord]
+# user：自己的账号 token（裸 Authorization）；bot：机器人 token（需 Message Content intent）
+auth = "user"
+# token 从 macOS Keychain 读取，服务名可自定义；不存在时回落到下面的环境变量
+token_keychain_service = "dc-digest-discord-token"
+token_env = "DC_DIGEST_DISCORD_TOKEN"
+
+[alerts]
+# 封号、凭证失效、网络异常、摘要失败等导致拿不到聊天信息时，通过飞书发提醒而不是静默失败
+enabled = true
+
+[store]
+# 库留存期：超过这个天数的消息与附件记录由 prune 清理（run --prune 或 schedule 安装的任务会顺带执行）
+retention_days = 60
+
+[logs]
+# 定时任务的 stdout/stderr 合并写到 data/logs/launchd.log；每次启动与结束时检查，
+# 超过 max_bytes 就就地截到尾部 keep_bytes，保证无人值守也不会无限增长
+max_bytes = 2000000
+keep_bytes = 200000
+
+[media]
+# 图片附件：抓取阶段只记录元数据，media 阶段按节奏下载，摘要阶段作为附图交给 spi
+enabled = true
+max_files_per_run = 40
+max_bytes_per_file = 8000000
+max_bytes_per_run = 40000000
+min_download_delay = 1.0
+max_download_delay = 3.0
+# 单次摘要调用附带的图片上限，以及单份简报使用的图片总上限
+max_images_per_call = 8
+max_images_per_digest = 30
+# 摘要前自动补齐缺失图片（本地文件只是缓存，库里以 Discord 下载链接为准）
+ensure_on_digest = true
+# 只下载这些域名下的附件，其余域名记为外部链接、只作文本、永不访问
+allowed_hosts = ["discordapp.com", "discordapp.net", "discord.com"]
+# 图片缓存目录：默认系统临时目录（$TMPDIR/dc-digest-media），可显式固定
+# media_dir = "/tmp/dc-digest-media"
+
+[fetch]
+# 拟人化取数：50 条一页、页间随机 2.5~6s、每 5 页长停顿，单轮预算触顶即保存游标下次续传
+page_size = 50
+max_requests_per_run = 40
+max_messages_per_run = 2000
+max_minutes_per_run = 15.0
+min_page_delay = 2.5
+max_page_delay = 6.0
+pause_every_pages = 5
+pause_min = 10.0
+pause_max = 25.0
+# 多频道时的切换冷却；只跑一个频道可以不动，加频道后建议降到 20 / 40
+channel_cooldown_min = 45.0
+channel_cooldown_max = 90.0
+rate_limit_stop_after = 2
+rate_limit_backoff_minutes = 45.0
+
+[summarize]
+command = "spi"
+args = ["-p", "--no-tools", "--no-session", "--no-sandbox", "--mode", "text", "--model", "opencode-go/deepseek-v4.1-flash"]
+max_chars_per_call = 150000
+timeout_seconds = 900.0
+
+[feishu]
+enabled = true
+# 复用 pi-channel 扩展的 appId / appSecret；也可以指向自己的凭证文件
+credentials_file = "~/.pi/agent/extensions/pi-channel/config.json"
+domain = "feishu"
+msg_type = "interactive"
+receiver_type = "chat_id"
+# 留空则使用凭证文件里的 feishu.defaultReceiver.value
+receiver_value = ""
+max_chars_per_message = 6000
+send_interval_seconds = 1.5
+
+# 每个要抓的频道一条，channel_id 用 `uv run dc-digest guilds` 获取
+[[channels]]
+guild_id = "000000000000000000"
+channel_id = "000000000000000000"
+name = "#频道名"

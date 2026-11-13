@@ -1,0 +1,25 @@
+[project]
+name = "dc-digest"
+version = "0.1.0"
+description = "按指定时间窗抓取 Discord 频道消息，并用 spi 生成中文简报"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27"]
+
+[project.scripts]
+dc-digest = "dc_digest.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dc_digest"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
