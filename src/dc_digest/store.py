@@ -623,10 +623,16 @@ class Store:
         self._conn.commit()
 
     def last_finished_run_to_ms(self) -> int | None:
+        """已抓取到的最远时间点。
+
+        按窗口右边界取最大值，而不是按插入顺序取最后一行：手工补抓一段旧窗口
+        时，插入顺序会落在最后，用 id 排序会把下次起点拽回过去。
+        """
         row = self._conn.execute(
-            "SELECT window_to_ms FROM runs WHERE status IN ('ok', 'incomplete') ORDER BY id DESC LIMIT 1"
+            "SELECT MAX(window_to_ms) AS to_ms FROM runs"
+            " WHERE status IN ('ok', 'incomplete')"
         ).fetchone()
-        return int(row["window_to_ms"]) if row else None
+        return int(row["to_ms"]) if row and row["to_ms"] is not None else None
 
 
 

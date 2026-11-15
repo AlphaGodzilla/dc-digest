@@ -193,3 +193,22 @@ def test_append_run_note_keeps_original_reason(tmp_path: Path) -> None:
         store.append_run_note(run.id, "已通过飞书提醒")
         row = store._conn.execute("SELECT note FROM runs WHERE id = ?", (run.id,)).fetchone()
     assert row["note"] == "简报未完成：spi 退出码 1 | 已通过飞书提醒"
+
+
+def test_last_finished_run_uses_furthest_window(tmp_path: Path) -> None:
+    """补抓旧窗口会新增在最后一行，但不能把下次起点拽回过去。"""
+    with _store(tmp_path) as store:
+        newer = store.start_run(5_000, 9_000)
+        store.finish_run(newer.id, status="ok", requests=1, messages=1)
+        backfill = store.start_run(1_000, 2_000)  # 事后补一段更早的窗口
+        store.finish_run(backfill.id, status="ok", requests=1, messages=1)
+        assert store.last_finished_run_to_ms() == 9_000
+
+
+def test_last_finished_run_ignores_failed_runs(tmp_path: Path) -> None:
+    with _store(tmp_path) as store:
+        ok = store.start_run(1_000, 2_000)
+        store.finish_run(ok.id, status="ok", requests=1, messages=1)
+        failed = store.start_run(3_000, 4_000)
+        store.finish_run(failed.id, status="error", requests=0, messages=0)
+        assert store.last_finished_run_to_ms() == 2_000
