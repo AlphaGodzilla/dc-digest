@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,9 @@ def _select(images: dict[int, ImageInput], indices: Sequence[int], limit: int) -
         selected = selected[:limit]
     return selected
 
+
+EMPTY_OUTPUT_ATTEMPTS = 3
+EMPTY_OUTPUT_RETRY_SECONDS = 8.0
 
 FALLBACK_BIN_DIRS = ("~/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
 
@@ -117,34 +121,47 @@ def call_summarizer(
         len(prompt),
         len(images),
     )
-    try:
-        result = subprocess.run(
-            argv,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            env=summarizer_env(),
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise SummarizeError(
-            f"找不到摘要命令 {config.command!r}：已在 PATH 与 {', '.join(FALLBACK_BIN_DIRS)} 中查找。"
-            "定时任务的 PATH 比登录 shell 精简，建议在 config.toml 的 [summarize] command 写成绝对路径，"
-            "或重新执行 schedule install 让任务带上完整 PATH"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise SummarizeError(
-            f"{config.command} 超过 {config.timeout_seconds:.0f}s 未返回"
-        ) from exc
-    if result.returncode != 0:
-        raise SummarizeError(
-            f"{config.command} 退出码 {result.returncode}\n{result.stderr.strip()[-1200:]}"
-        )
-    output = result.stdout.strip()
-    if not output:
-        raise SummarizeError(f"{config.command} 没有输出\n{result.stderr.strip()[-1200:]}")
-    return output
+    stderr_tail = ""
+    for attempt in range(1, EMPTY_OUTPUT_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(
+                argv,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=config.timeout_seconds,
+                env=summarizer_env(),
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise SummarizeError(
+                f"找不到摘要命令 {config.command!r}：已在 PATH 与 {', '.join(FALLBACK_BIN_DIRS)} 中查找。"
+                "定时任务的 PATH 比登录 shell 精简，建议在 config.toml 的 [summarize] command 写成绝对路径，"
+                "或重新执行 schedule install 让任务带上完整 PATH"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SummarizeError(
+                f"{config.command} 超过 {config.timeout_seconds:.0f}s 未返回"
+            ) from exc
+        if result.returncode != 0:
+            raise SummarizeError(
+                f"{config.command} 退出码 {result.returncode}\n{result.stderr.strip()[-1200:]}"
+            )
+        output = result.stdout.strip()
+        if output:
+            return output
+        stderr_tail = result.stderr.strip()[-1200:]
+        # 模型偶发返回空内容（退出码仍是 0），这类失败重试一次通常就好
+        if attempt < EMPTY_OUTPUT_ATTEMPTS:
+            LOGGER.warning(
+                "摘要子进程没有输出，%d/%d 次重试",
+                attempt,
+                EMPTY_OUTPUT_ATTEMPTS,
+            )
+            time.sleep(EMPTY_OUTPUT_RETRY_SECONDS)
+    raise SummarizeError(
+        f"{config.command} 连续 {EMPTY_OUTPUT_ATTEMPTS} 次没有输出\n{stderr_tail}"
+    )
 
 
 def summarize(

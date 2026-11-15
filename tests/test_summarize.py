@@ -76,3 +76,58 @@ def test_missing_command_becomes_summarize_error(monkeypatch) -> None:
     message = str(excinfo.value)
     assert "找不到摘要命令" in message
     assert "PATH" in message
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _config_for_retry() -> SummarizeConfig:
+    return SummarizeConfig(command="spi", args=("-p",), timeout_seconds=5.0)
+
+
+def test_empty_output_is_retried(monkeypatch) -> None:
+    """模型偶发返回空内容（退出码 0）时重试，而不是直接失败。"""
+    calls: list[int] = []
+    replies = [_FakeCompleted(stdout=""), _FakeCompleted(stdout="简报正文")]
+
+    def fake_run(*_args, **_kwargs):
+        calls.append(1)
+        return replies[len(calls) - 1]
+
+    monkeypatch.setattr("dc_digest.summarize.subprocess.run", fake_run)
+    monkeypatch.setattr("dc_digest.summarize.time.sleep", lambda _s: None)
+    assert call_summarizer(_config_for_retry(), "prompt") == "简报正文"
+    assert len(calls) == 2
+
+
+def test_empty_output_eventually_fails_with_reason(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_run(*_args, **_kwargs):
+        calls.append(1)
+        return _FakeCompleted(stdout="  \n ", stderr="provider returned empty")
+
+    monkeypatch.setattr("dc_digest.summarize.subprocess.run", fake_run)
+    monkeypatch.setattr("dc_digest.summarize.time.sleep", lambda _s: None)
+    with pytest.raises(SummarizeError) as excinfo:
+        call_summarizer(_config_for_retry(), "prompt")
+    assert len(calls) == 3
+    assert "连续 3 次没有输出" in str(excinfo.value)
+    assert "provider returned empty" in str(excinfo.value)
+
+
+def test_nonzero_exit_is_not_retried(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_run(*_args, **_kwargs):
+        calls.append(1)
+        return _FakeCompleted(returncode=2, stderr="boom")
+
+    monkeypatch.setattr("dc_digest.summarize.subprocess.run", fake_run)
+    with pytest.raises(SummarizeError):
+        call_summarizer(_config_for_retry(), "prompt")
+    assert len(calls) == 1
