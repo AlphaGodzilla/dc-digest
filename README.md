@@ -200,7 +200,7 @@ REST 请求头全部由 `discord_api.build_headers()` 生成，`doctor` 会回�
 
 ### 摘要
 
-transcript 只保留时间、昵称、正文、附件名与回复对象，正文压成单行并截断到 1000 字符。整窗字符数不超过 `summarize.max_chars_per_call` 时一次调用出稿；超过时按块先摘要再合并（`prompts/chunk.md` + `prompts/reduce.md`）。
+transcript 只保留时间、昵称、正文、附件名与回复对象，正文压成单行并截断到 1000 字符。昵称统一按「服务器昵称 → 全局显示名 → 账号名」取值，正文与「回复谁」用同一条链路，不会同一个人出现两个名字。整窗字符数不超过 `summarize.max_chars_per_call` 时一次调用出稿；超过时按块先摘要再合并（`prompts/chunk.md` + `prompts/reduce.md`）。
 
 摘要后端的调用形态是：
 

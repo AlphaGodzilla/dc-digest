@@ -10,6 +10,7 @@ from dc_digest.discord_api import (
     DiscordClient,
     DiscordError,
     DiscordRateLimited,
+    display_name,
     ms_from_snowflake,
     snowflake_from_ms,
 )
@@ -145,3 +146,34 @@ def test_headers_reject_unknown_auth() -> None:
         build_headers("abc123", "selfbot")
     with pytest.raises(DiscordError):
         build_headers("", "user")
+
+
+def test_display_name_prefers_server_nickname() -> None:
+    author = {"username": "caca012718", "global_name": "icaca"}
+    assert display_name(author) == "icaca"
+    assert display_name(author, {"nick": "小卡"}) == "小卡"
+    assert display_name(author, {"nick": None}) == "icaca"
+
+
+def test_display_name_falls_back_to_username_without_global_name() -> None:
+    assert display_name({"username": "caca012718"}) == "caca012718"
+    assert display_name({}) == "unknown"
+
+
+def test_reply_author_uses_display_name_not_handle() -> None:
+    """回复上下文曾经只取 username，导致同一个人出现两个名字。"""
+    from dc_digest.cli import _to_message
+
+    payload = {
+        "id": "1000",
+        "timestamp": "2026-11-13T10:00:00+00:00",
+        "content": "同意",
+        "author": {"id": "42", "username": "caca012718", "global_name": "icaca"},
+        "referenced_message": {
+            "id": "999",
+            "author": {"id": "43", "username": "darkmage5279", "global_name": "MM_ULTRA"},
+        },
+    }
+    message = _to_message(1, payload)
+    assert message.author == "icaca"
+    assert message.reply_author == "MM_ULTRA"

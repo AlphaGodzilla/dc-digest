@@ -37,6 +37,7 @@ from .discord_api import (
     DiscordClient,
     DiscordError,
     DiscordRateLimited,
+    display_name,
     ms_from_snowflake,
     snowflake_from_ms,
 )
@@ -151,10 +152,13 @@ def _parse_iso_ms(value: str) -> int:
 
 def _to_message(channel_id: int, payload: dict) -> Message:
     author = payload.get("author") or {}
-    display_name = author.get("global_name") or author.get("username") or "unknown"
     author_id = author.get("id")
     referenced = payload.get("referenced_message") or {}
-    reply_author = (referenced.get("author") or {}).get("username") if referenced else None
+    reply_author = None
+    if referenced:
+        ref_author = referenced.get("author") or {}
+        if ref_author:
+            reply_author = display_name(ref_author, referenced.get("member"))
     edited = payload.get("edited_timestamp")
     attachments = tuple(
         item.get("filename") or "file" for item in payload.get("attachments") or []
@@ -163,7 +167,7 @@ def _to_message(channel_id: int, payload: dict) -> Message:
         id=int(payload["id"]),
         channel_id=channel_id,
         author_id=int(author_id) if author_id else None,
-        author=display_name,
+        author=display_name(author, payload.get("member")),
         ts_ms=_parse_iso_ms(payload["timestamp"]),
         content=payload.get("content") or "",
         attachments=attachments,
@@ -638,7 +642,7 @@ def cmd_guilds(config: Config, args: argparse.Namespace) -> int:
         config.discord.token(), auth=config.discord.auth, proxy=config.http.proxy or None
     ) as client:
         me = client.me()
-        LOGGER.info("当前账号：%s（id=%s）", me.get("username"), me.get("id"))
+        LOGGER.info("当前账号：%s（id=%s）", display_name(me), me.get("id"))
         if args.guild is not None:
             for channel in client.guild_channels(args.guild):
                 if channel.get("type") in TEXT_CHANNEL_TYPES:

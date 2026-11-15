@@ -62,6 +62,19 @@ def ms_from_snowflake(value: int) -> int:
     return (value >> 22) + DISCORD_EPOCH_MS
 
 
+def display_name(author: dict, member: dict | None = None) -> str:
+    """发言人的显示名：服务器昵称 > 全局显示名 > 账号名。
+
+    账号名（username）常带数字后缀，比如 caca012718；直接用它会让同一个人在
+    正文与「回复谁」里显示成两个名字，因此统一走这条链路。
+    """
+    nick = (member or {}).get("nick")
+    if nick:
+        return str(nick)
+    name = author.get("global_name") or author.get("username")
+    return str(name) if name else "unknown"
+
+
 def build_headers(token: str, auth: str) -> dict[str, str]:
     """构造 REST 请求头。
 
