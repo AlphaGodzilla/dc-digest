@@ -4,10 +4,11 @@ from dc_digest.render import (
     render_message,
     render_transcript,
 )
-from dc_digest.store import Message
+from dc_digest.store import EmbedPreview, Message
 
 TZ = "Asia/Shanghai"
 DAY = 86_400_000
+START_MS = 1_757_293_200_000  # 2026-09-08 09:00 (Asia/Shanghai)
 
 
 def _message(message_id: int, ts_ms: int, content: str = "内容", **kwargs: object) -> Message:
@@ -90,3 +91,52 @@ def test_chunking_carries_links_by_message() -> None:
     )
     assert "外部链接" not in chunks[0].text.split("---")[1]
     assert "[外部链接: https://evil.example.com/a.png]" in chunks[0].text
+
+
+def _x_embed_message() -> Message:
+    return Message(
+        id=3,
+        channel_id=1,
+        author_id=9,
+        author="MM_ULTRA",
+        ts_ms=START_MS,
+        content="https://x.com/SUOHA_AI/status/2121839303605027147",
+        embeds=(
+            EmbedPreview(
+                url="https://twitter.com/SUOHA_AI/status/2121839303605027147",
+                description="这个老哥是早期 $BNB 的前几大户",
+                site="X",
+                author="梭哈.AI (@SUOHA_AI)",
+            ),
+        ),
+    )
+
+
+def test_render_includes_discord_preview_line() -> None:
+    line = render_message(_x_embed_message(), TZ, RenderPolicy())
+    assert "https://x.com/SUOHA_AI/status/2121839303605027147" in line
+    assert "[链接预览 X · 梭哈.AI (@SUOHA_AI)]" in line
+    assert "早期 $BNB 的前几大户" in line
+
+
+def test_render_truncates_long_preview() -> None:
+    long = Message(
+        id=4,
+        channel_id=1,
+        author_id=9,
+        author="a",
+        ts_ms=START_MS,
+        content="",
+        embeds=(EmbedPreview(description="字" * 900),),
+    )
+    line = render_message(long, TZ, RenderPolicy(max_preview_chars=50))
+    assert "…" in line
+    assert line.count("字") == 50
+
+
+def test_render_skips_empty_preview() -> None:
+    empty = Message(
+        id=5, channel_id=1, author_id=9, author="a", ts_ms=START_MS, content="hi",
+        embeds=(EmbedPreview(),),
+    )
+    assert "链接预览" not in render_message(empty, TZ, RenderPolicy())

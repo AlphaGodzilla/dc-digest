@@ -23,6 +23,8 @@ MAX_LINKS_PER_MESSAGE = 3
 @dataclass(frozen=True)
 class RenderPolicy:
     max_content_chars: int = 1000
+    # Discord 生成的链接预览（如 X 推文）通常已截断，这里再收一道以免挤占预算
+    max_preview_chars: int = 300
     include_attachments: bool = True
     include_reply: bool = True
 
@@ -40,6 +42,23 @@ def _clean(text: str, limit: int) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[:limit] + "…"
+
+
+def _preview_lines(message: Message, limit: int) -> list[str]:
+    """把 Discord 已生成的链接预览渲染成一行行文本。
+
+    预览由 Discord 抓取并随消息下发，读它不产生对外请求；正文缺失时预览也会缺，
+    因此这里只做展示，不做任何补抓。
+    """
+    lines: list[str] = []
+    for embed in message.embeds:
+        head = " · ".join(part for part in (embed.site, embed.author) if part)
+        body = _clean(" ".join(part for part in (embed.title, embed.description) if part), limit)
+        if not head and not body:
+            continue
+        label = f"[链接预览 {head}]" if head else "[链接预览]"
+        lines.append(f"{label} {body}".rstrip())
+    return lines
 
 
 def _image_suffix(labels: Sequence[int]) -> str:
@@ -78,7 +97,11 @@ def render_message(
         parts.append(body)
     if policy.include_attachments and message.attachments:
         parts.append("[附件: " + ", ".join(message.attachments) + "]")
-    return " ".join(parts) + _image_suffix(image_labels) + _link_suffix(external_links)
+    line = " ".join(parts) + _image_suffix(image_labels) + _link_suffix(external_links)
+    previews = _preview_lines(message, policy.max_preview_chars)
+    if not previews:
+        return line
+    return "\n".join([line, *previews])
 
 
 def render_transcript(

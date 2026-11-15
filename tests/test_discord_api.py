@@ -177,3 +177,29 @@ def test_reply_author_uses_display_name_not_handle() -> None:
     message = _to_message(1, payload)
     assert message.author == "icaca"
     assert message.reply_author == "MM_ULTRA"
+
+
+def test_message_carries_embed_preview() -> None:
+    from dc_digest.cli import _to_message
+
+    payload = {
+        "id": "2000",
+        "timestamp": "2026-11-15T12:50:32.297000+00:00",
+        "content": "https://x.com/SUOHA_AI/status/2121839303605027147",
+        "author": {"id": "42", "username": "darkmage5279", "global_name": "MM_ULTRA"},
+        "embeds": [
+            {
+                "type": "rich",
+                "url": "https://twitter.com/SUOHA_AI/status/2121839303605027147",
+                "description": "这个老哥是早期 $BNB 的前几大户，对\\.\\.\\.",
+                "author": {"name": "梭哈.AI (@SUOHA_AI)"},
+                "footer": {"text": "X"},
+            }
+        ],
+    }
+    message = _to_message(1, payload)
+    assert len(message.embeds) == 1
+    preview = message.embeds[0]
+    assert preview.site == "X"
+    assert preview.author == "梭哈.AI (@SUOHA_AI)"
+    assert preview.description == "这个老哥是早期 $BNB 的前几大户，对..."  # 反转义 Discord 的 \.

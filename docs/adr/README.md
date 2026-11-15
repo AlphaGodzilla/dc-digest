@@ -13,3 +13,4 @@
 | [0007](./0007-read-only-no-posting.md) | 只读不发言，通信维持 REST 轮询而非 Gateway 常驻 | accepted | 2026-11-13 |
 | [0008](./0008-notify-failures-via-feishu.md) | 抓取失败必须通过飞书提醒，不静默失败 | accepted | 2026-11-13 |
 | [0009](./0009-track-brief-progress-separately-from-fetch.md) | 简报进度与抓取进度分开记账 | accepted | 2026-11-13 |
+| [0010](./0010-use-discord-embeds-instead-of-fetching-pages.md) | 复用 Discord 已生成的链接预览，不抓外部页面 | accepted | 2026-11-16 |

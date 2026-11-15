@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Sequence
@@ -50,7 +51,7 @@ from .media import (
 )
 from .pace import BudgetExhausted, Pacer
 from .render import RenderPolicy, chunk_messages
-from .store import Message, RunRecord, Store, WindowImage
+from .store import EmbedPreview, Message, RunRecord, Store, WindowImage
 from .summarize import (
     ImageInput,
     SummarizeError,
@@ -150,6 +151,14 @@ def _parse_iso_ms(value: str) -> int:
     return int(datetime.fromisoformat(value).timestamp() * 1000)
 
 
+# Discord 会给预览文本里的标点加反斜杠，例如 `\!` `\(` `\.`，读出来前先还原
+DISCORD_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|~>])")
+
+
+def _unescape_preview(text: str) -> str:
+    return DISCORD_ESCAPE.sub(r"\1", text)
+
+
 def _to_message(channel_id: int, payload: dict) -> Message:
     author = payload.get("author") or {}
     author_id = author.get("id")
@@ -159,6 +168,19 @@ def _to_message(channel_id: int, payload: dict) -> Message:
         ref_author = referenced.get("author") or {}
         if ref_author:
             reply_author = display_name(ref_author, referenced.get("member"))
+    embeds = tuple(
+        EmbedPreview(
+            url=str(item.get("url") or "")[:500],
+            title=_unescape_preview(str(item.get("title") or ""))[:300],
+            description=_unescape_preview(str(item.get("description") or ""))[:2000],
+            site=_unescape_preview(
+                str((item.get("footer") or {}).get("text") or (item.get("provider") or {}).get("name") or "")
+            )[:80],
+            author=_unescape_preview(str((item.get("author") or {}).get("name") or ""))[:120],
+        )
+        for item in payload.get("embeds") or []
+        if isinstance(item, dict)
+    )
     edited = payload.get("edited_timestamp")
     attachments = tuple(
         item.get("filename") or "file" for item in payload.get("attachments") or []
@@ -173,6 +195,7 @@ def _to_message(channel_id: int, payload: dict) -> Message:
         attachments=attachments,
         reply_author=reply_author,
         edited_ts_ms=_parse_iso_ms(edited) if edited else None,
+        embeds=embeds,
     )
 
 

@@ -53,6 +53,39 @@ def sanitize_filename(filename: str) -> str:
     return cleaned[-80:]
 
 
+SUFFIX_BY_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _preferred_embed_url(media: dict, allowed_hosts: tuple[str, ...]) -> str:
+    """预览图优先用 Discord 的代理地址。
+
+    X 这类站点的原图在 pbs.twimg.com（域名不在白名单），Discord 会同时给出
+    images-ext-*.discordapp.net 上的代理地址；取代理地址即可在不访问外部站点
+    的前提下拿到同一张图。
+    """
+    direct = media.get("url") or ""
+    proxy = media.get("proxy_url") or ""
+    if direct and is_trusted_media_url(direct, allowed_hosts):
+        return direct
+    if proxy and is_trusted_media_url(proxy, allowed_hosts):
+        return proxy
+    return direct or proxy
+
+
+def _embed_suffix(content_type: str | None, url: str) -> str:
+    if content_type:
+        base = content_type.split(";")[0].strip().lower()
+        if base in SUFFIX_BY_TYPE:
+            return SUFFIX_BY_TYPE[base]
+    suffix = Path(urlparse(url).path).suffix.lower()
+    return suffix if suffix in IMAGE_EXTENSIONS else ""
+
+
 def collect_media(
     message_id: int, payload: dict, allowed_hosts: tuple[str, ...]
 ) -> list[MediaRecord]:
@@ -88,21 +121,26 @@ def collect_media(
     for embed in payload.get("embeds") or []:
         for key in ("image", "thumbnail"):
             media = embed.get(key) or {}
-            url = media.get("url") or media.get("proxy_url")
+            url = _preferred_embed_url(media, allowed_hosts)
             if not url:
                 continue
+            content_type = media.get("content_type")
+            suffix = _embed_suffix(content_type, url)
+            trusted = is_trusted_media_url(url, allowed_hosts)
+            if not trusted:
+                kind = "external"
+            elif is_image(content_type, f"x{suffix}"):
+                kind = "image"
+            else:
+                kind = "other"
             records.append(
                 MediaRecord(
                     message_id=message_id,
                     ordinal=ordinal,
-                    kind=(
-                        "external"
-                        if not is_trusted_media_url(url, allowed_hosts)
-                        else ("image" if is_image(None, url) else "other")
-                    ),
+                    kind=kind,
                     url=url,
-                    filename=f"embed-{key}-{ordinal}",
-                    content_type=None,
+                    filename=f"embed-{key}-{ordinal}{suffix}",
+                    content_type=content_type,
                     size_bytes=None,
                 )
             )

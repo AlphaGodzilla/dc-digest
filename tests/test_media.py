@@ -4,6 +4,9 @@ import pytest
 
 from dc_digest.config import MediaConfig
 from dc_digest.discord_api import AttachmentTooLarge, DiscordError, DiscordRateLimited
+
+ALLOWED_HOSTS = ("discordapp.com", "discordapp.net", "discord.com")
+
 from dc_digest.media import (
     MediaDownloader,
     collect_media,
@@ -292,3 +295,39 @@ def test_external_links_are_never_downloaded(tmp_path: Path) -> None:
     assert store.window_external_links([1], 0, 2_000) == [
         (10, "https://evil.example.com/a.png")
     ]
+
+
+def test_x_embed_image_prefers_discord_proxy() -> None:
+    """X 的原图域名不在白名单，但 Discord 代理地址在白名单内，应改走代理。"""
+    payload = {
+        "embeds": [
+            {
+                "type": "rich",
+                "url": "https://twitter.com/SUOHA_AI/status/1",
+                "image": {
+                    "url": "https://pbs.twimg.com/media/HXJH?format=webp&name=large",
+                    "proxy_url": "https://images-ext-1.discordapp.net/external/token/https/pbs.twimg.com/media/HXJH",
+                    "content_type": "image/webp",
+                },
+            }
+        ]
+    }
+    records = collect_media(1, payload, ALLOWED_HOSTS)
+    embed = [r for r in records if r.filename.startswith("embed-image")]
+    assert len(embed) == 1
+    record = embed[0]
+    assert record.kind == "image"
+    assert record.url.startswith("https://images-ext-1.discordapp.net/")
+    assert record.filename.endswith(".webp")
+
+
+def test_embed_image_without_trusted_host_stays_external() -> None:
+    payload = {
+        "embeds": [
+            {"image": {"url": "https://example.com/a.png", "content_type": "image/png"}}
+        ]
+    }
+    records = collect_media(1, payload, ALLOWED_HOSTS)
+    embed = [r for r in records if r.filename.startswith("embed-image")]
+    assert embed[0].kind == "external"
+    assert embed[0].url == "https://example.com/a.png"

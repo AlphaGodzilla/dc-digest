@@ -9,7 +9,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     attachments TEXT NOT NULL DEFAULT '[]',
     reply_author TEXT,
-    edited_ts_ms INTEGER
+    edited_ts_ms INTEGER,
+    embeds TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS messages_channel_ts ON messages(channel_id, ts_ms);
 CREATE TABLE IF NOT EXISTS channel_state (
@@ -79,6 +80,21 @@ def _now_iso() -> str:
 
 
 @dataclass(frozen=True)
+class EmbedPreview:
+    """消息里由 Discord 生成的链接预览，只读不改外部站点。
+
+    X / 微博这类站点的预览由 Discord 侧解析后随消息下发，读取它不产生任何
+    对外请求；代价是内容可能被截断，且原文缺失时预览也会缺失。
+    """
+
+    url: str = ""
+    title: str = ""
+    description: str = ""
+    site: str = ""
+    author: str = ""
+
+
+@dataclass(frozen=True)
 class Message:
     id: int
     channel_id: int
@@ -89,6 +105,7 @@ class Message:
     attachments: tuple[str, ...] = ()
     reply_author: str | None = None
     edited_ts_ms: int | None = None
+    embeds: tuple[EmbedPreview, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -148,6 +165,26 @@ class RunRecord:
     status: str
 
 
+def _embeds_from_row(raw: str | None) -> tuple[EmbedPreview, ...]:
+    if not raw:
+        return ()
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return ()
+    return tuple(
+        EmbedPreview(
+            url=str(item.get("url") or ""),
+            title=str(item.get("title") or ""),
+            description=str(item.get("description") or ""),
+            site=str(item.get("site") or ""),
+            author=str(item.get("author") or ""),
+        )
+        for item in items
+        if isinstance(item, dict)
+    )
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +194,32 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """给旧库补上后加的列：CREATE TABLE IF NOT EXISTS 不会改动已有表。"""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(messages)")}
+        if "embeds" not in columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN embeds TEXT NOT NULL DEFAULT '[]'"
+            )
+        # 旧版本把 Discord 代理域名上的预览图误判成外部链接而跳过，重新判定后放回待下载
+        self._conn.execute(
+            """
+            UPDATE message_media
+               SET status = 'pending', note = NULL
+             WHERE kind = 'image' AND status = 'skipped'
+               AND note = '外部链接，仅作文本，不下载'
+               AND (
+                   url LIKE 'https://%.discordapp.net/%'
+                   OR url LIKE 'https://%.discord.com/%'
+                   OR url LIKE 'https://discordapp.net/%'
+                   OR url LIKE 'https://discord.com/%'
+               )
+            """
+        )
+        self._conn.commit()
+
 
     def __enter__(self) -> Self:
         return self
@@ -181,6 +244,9 @@ class Store:
                 json.dumps(list(message.attachments), ensure_ascii=False),
                 message.reply_author,
                 message.edited_ts_ms,
+                json.dumps(
+                    [asdict(embed) for embed in message.embeds], ensure_ascii=False
+                ),
             )
             for message in messages
         ]
@@ -188,13 +254,15 @@ class Store:
             return 0
         self._conn.executemany(
             """
-            INSERT INTO messages (id, channel_id, author_id, author, ts_ms, content, attachments, reply_author, edited_ts_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, channel_id, author_id, author, ts_ms, content,
+                                  attachments, reply_author, edited_ts_ms, embeds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 attachments = excluded.attachments,
                 reply_author = excluded.reply_author,
-                edited_ts_ms = excluded.edited_ts_ms
+                edited_ts_ms = excluded.edited_ts_ms,
+                embeds = excluded.embeds
             """,
             rows,
         )
@@ -207,7 +275,8 @@ class Store:
         placeholders = ",".join("?" for _ in channel_ids)
         cursor = self._conn.execute(
             f"""
-            SELECT id, channel_id, author_id, author, ts_ms, content, attachments, reply_author, edited_ts_ms
+            SELECT id, channel_id, author_id, author, ts_ms, content, attachments,
+                   reply_author, edited_ts_ms, embeds
             FROM messages
             WHERE channel_id IN ({placeholders}) AND ts_ms >= ? AND ts_ms < ?
             ORDER BY ts_ms ASC, id ASC
@@ -225,6 +294,7 @@ class Store:
                 attachments=tuple(json.loads(row["attachments"])),
                 reply_author=row["reply_author"],
                 edited_ts_ms=row["edited_ts_ms"],
+                embeds=_embeds_from_row(row["embeds"]),
             )
             for row in cursor.fetchall()
         ]
@@ -278,7 +348,8 @@ class Store:
                    media.content_type, media.size_bytes, message.channel_id
             FROM message_media AS media
             JOIN messages AS message ON message.id = media.message_id
-            WHERE media.kind = 'image' AND media.status = 'pending'
+            -- failed 也重新尝试：代理抖动之类的一次性失败不该让这张图永久卡住
+            WHERE media.kind = 'image' AND media.status IN ('pending', 'failed')
               AND message.channel_id IN ({placeholders})
               AND message.ts_ms >= ? AND message.ts_ms < ?
             ORDER BY message.ts_ms ASC, media.message_id ASC, media.ordinal ASC
